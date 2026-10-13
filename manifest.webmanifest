@@ -1,0 +1,12 @@
+{
+  "name": "Diario",
+  "short_name": "Diario",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#f6f6f4",
+  "theme_color": "#1f2937",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

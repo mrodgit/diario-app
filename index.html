@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Diario</title>
+<meta name="theme-color" content="#1f2937">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<style>
+  :root {
+    --bg: #f6f6f4; --card: #ffffff; --text: #1f2937; --muted: #6b7280;
+    --line: #e5e7eb; --accent: #2563eb; --accent-text: #ffffff;
+    --danger: #b91c1c; --ok: #15803d; --warn: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111315; --card: #1b1e21; --text: #e5e7eb; --muted: #9ca3af;
+      --line: #2d3136; --accent: #3b82f6; --accent-text: #ffffff;
+      --danger: #f87171; --ok: #4ade80; --warn: #fbbf24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 640px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 14px 0 8px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 26px 0 8px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+  textarea, input {
+    width: 100%; font: inherit; color: inherit; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+  }
+  textarea { min-height: 120px; resize: vertical; }
+  label { display: block; font-size: 14px; color: var(--muted); margin: 12px 0 4px; }
+  .row { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+  .grow { flex: 1; }
+  button {
+    font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--text);
+    border-radius: 10px; padding: 10px 14px; cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  button.small { padding: 4px 10px; font-size: 13px; border-radius: 8px; }
+  button.link { border: 0; background: none; color: var(--muted); padding: 6px; font-size: 14px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .toggle { display: flex; align-items: center; gap: 6px; font-size: 15px; user-select: none; }
+  .toggle input { width: 20px; height: 20px; }
+  .msg { font-size: 14px; margin-top: 10px; min-height: 1.2em; }
+  .msg.ok { color: var(--ok); } .msg.err { color: var(--danger); }
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .item { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+  .item summary { list-style: none; cursor: pointer; }
+  .item summary::-webkit-details-marker { display: none; }
+  .meta { font-size: 13px; color: var(--muted); }
+  .stale { color: var(--warn); font-weight: 600; }
+  .body { white-space: pre-wrap; font-size: 15px; margin-top: 6px; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+  .inbox li { font-size: 14px; margin: 4px 0; }
+  .inbox { padding-left: 18px; margin: 0; }
+  .empty { color: var(--muted); font-size: 14px; }
+  .hidden { display: none !important; }
+  .help { font-size: 14px; color: var(--muted); }
+  .help a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Diario</h1>
+    <button class="link hidden" id="btn-refresh" title="Recargar">↻ Recargar</button>
+  </header>
+
+  <!-- Configuración inicial -->
+  <section id="view-setup" class="hidden">
+    <div class="card">
+      <p class="help">Configura este dispositivo una sola vez. Los datos se quedan guardados en este navegador y solo se envían a GitHub.</p>
+      <label for="cfg-repo">Repositorio (usuario/nombre)</label>
+      <input id="cfg-repo" placeholder="usuario/repositorio" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label for="cfg-token">Token de GitHub</label>
+      <input id="cfg-token" type="password" placeholder="github_pat_…" autocomplete="off">
+      <label for="cfg-pin">PIN (opcional)</label>
+      <input id="cfg-pin" type="password" inputmode="numeric" placeholder="Vacío = sin PIN" autocomplete="off">
+      <p class="help">Con PIN, el token se guarda cifrado y la aplicación lo pide al abrirse.</p>
+      <div class="row"><button class="primary grow" id="btn-save">Guardar y comprobar</button></div>
+      <div class="msg" id="setup-msg"></div>
+    </div>
+  </section>
+
+  <!-- Desbloqueo con PIN -->
+  <section id="view-lock" class="hidden">
+    <div class="card">
+      <label for="lock-pin">PIN</label>
+      <input id="lock-pin" type="password" inputmode="numeric" autocomplete="off">
+      <div class="row"><button class="primary grow" id="btn-unlock">Desbloquear</button></div>
+      <div class="msg" id="lock-msg"></div>
+    </div>
+  </section>
+
+  <!-- Aplicación -->
+  <section id="view-app" class="hidden">
+    <div class="card">
+      <textarea id="txt" placeholder="Escribe o dicta con el micrófono del teclado…"></textarea>
+      <div class="row">
+        <label class="toggle"><input type="checkbox" id="chk-urgent"> 🔴 Urgente</label>
+        <span class="grow"></span>
+        <button class="primary" id="btn-add">Anotar</button>
+      </div>
+      <div class="msg" id="add-msg"></div>
+    </div>
+
+    <h2>En la bandeja <span id="inbox-count"></span></h2>
+    <div id="inbox"></div>
+
+    <h2>Abiertas</h2>
+    <div id="open" class="list"></div>
+
+    <div class="row" style="margin-top:28px">
+      <button class="link" id="btn-reset">Olvidar este dispositivo</button>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const CFG_KEY = 'diario-cfg';
+  const DRAFT_KEY = 'diario-borrador';
+  const INBOX = 'entrada.md';
+  const DIARY = 'diario.md';
+  const STATES = { 'abierta': '⚪', 'en curso': '🟡', 'en espera': '⏸️', 'cerrada': '✅', 'nota': '📝' };
+  const PRIOS = ['alta', 'media', 'baja'];
+  const PRIO_ICON = { alta: '🔴', media: '🟠', baja: '🟢' };
+  const STALE_DAYS = 14;
+
+  const $ = (s) => document.querySelector(s);
+  let cfg = null;
+  let token = null;
+
+  // ---------- almacenamiento local ----------
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+    del(k) { try { localStorage.removeItem(k); } catch {} },
+  };
+
+  // ---------- utilidades ----------
+  const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const b64 = {
+    fromBytes(bytes) { let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s); },
+    toBytes(str) { return Uint8Array.from(atob(str.replace(/\s/g, '')), (c) => c.charCodeAt(0)); },
+  };
+
+  function madridNow() {
+    const parts = new Intl.DateTimeFormat('es-ES', {
+      timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date());
+    const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
+    return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+  }
+
+  function show(view) {
+    for (const v of ['setup', 'lock', 'app']) $('#view-' + v).classList.toggle('hidden', v !== view);
+    $('#btn-refresh').classList.toggle('hidden', view !== 'app');
+  }
+
+  function msg(el, text, kind) { el.textContent = text || ''; el.className = 'msg' + (kind ? ' ' + kind : ''); }
+
+  // ---------- cifrado opcional del token ----------
+  async function deriveKey(pin, salt) {
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' },
+      base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  }
+  async function encryptToken(tok, pin) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveKey(pin, salt);
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(tok)));
+    return { salt: b64.fromBytes(salt), iv: b64.fromBytes(iv), ct: b64.fromBytes(ct) };
+  }
+  async function decryptToken(enc, pin) {
+    const key = await deriveKey(pin, b64.toBytes(enc.salt));
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64.toBytes(enc.iv) }, key, b64.toBytes(enc.ct));
+    return new TextDecoder().decode(pt);
+  }
+
+  // ---------- GitHub ----------
+  function gh(path, opts = {}) {
+    return fetch(`https://api.github.com/repos/${cfg.repo}${path}`, {
+      cache: 'no-store',
+      ...opts,
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', ...(opts.headers || {}) },
+    });
+  }
+
+  async function getFile(name) {
+    const res = await gh(`/contents/${name}?t=${Date.now()}`);
+    if (res.status === 404) return { text: '', sha: null };
+    if (!res.ok) throw new Error(`GitHub respondió ${res.status} al leer ${name}`);
+    const data = await res.json();
+    return { text: new TextDecoder().decode(b64.toBytes(data.content)), sha: data.sha };
+  }
+
+  async function putFile(name, text, sha, message) {
+    const body = { message, content: b64.fromBytes(new TextEncoder().encode(text)) };
+    if (sha) body.sha = sha;
+    return gh(`/contents/${name}`, { method: 'PUT', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+  }
+
+  // Añade una línea al final de la bandeja. Si otro dispositivo escribió a la vez, reintenta.
+  async function appendToInbox(line) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { text, sha } = await getFile(INBOX);
+      const base = text === '' ? '# Bandeja de entrada\n\n' : (text.endsWith('\n') ? text : text + '\n');
+      const res = await putFile(INBOX, base + line + '\n', sha, 'entrada: nueva línea desde la app');
+      if (res.ok) return;
+      if (res.status !== 409 && res.status !== 422) throw new Error(`GitHub respondió ${res.status} al guardar`);
+    }
+    throw new Error('No se pudo guardar: el archivo cambió varias veces seguidas. Prueba otra vez.');
+  }
+
+  // ---------- lectura del diario ----------
+  function parseDiary(text) {
+    const entries = [];
+    let cur = null;
+    for (const line of text.split('\n')) {
+      const m = line.match(/^### #(\d+) · (.+?) · (.+?) · (.+)$/);
+      if (m) {
+        cur = { num: m[1], fecha: m[2].trim(), estadoRaw: m[3].trim(), prioRaw: m[4].trim(), body: [] };
+        cur.estado = Object.keys(STATES).find((k) => cur.estadoRaw.includes(k)) || cur.estadoRaw;
+        cur.prio = PRIOS.find((k) => cur.prioRaw.includes(k)) || 'media';
+        entries.push(cur);
+      } else if (cur && !/^#{1,2} /.test(line)) {
+        cur.body.push(line);
+      }
+    }
+    for (const e of entries) {
+      while (e.body.length && !e.body[e.body.length - 1].trim()) e.body.pop();
+      const dates = e.body.map((l) => (l.match(/^- (\d{4}-\d{2}-\d{2})/) || [])[1]).filter(Boolean);
+      e.lastMove = dates.length ? dates[dates.length - 1] : e.fecha.slice(0, 10);
+    }
+    return entries;
+  }
+
+  function daysSince(isoDate) {
+    const d = new Date(isoDate + 'T12:00:00');
+    return Math.floor((Date.now() - d.getTime()) / 86400000);
+  }
+
+  function renderOpen(entries) {
+    const open = entries
+      .filter((e) => e.estado !== 'cerrada' && e.estado !== 'nota')
+      .sort((a, b) => PRIOS.indexOf(a.prio) - PRIOS.indexOf(b.prio) || a.fecha.localeCompare(b.fecha));
+    const box = $('#open');
+    if (!open.length) { box.innerHTML = '<p class="empty">Nada abierto.</p>'; return; }
+    box.innerHTML = open.map((e) => {
+      const first = (e.body.find((l) => l.trim()) || '').trim();
+      const stale = daysSince(e.lastMove) > STALE_DAYS;
+      return `<details class="item">
+        <summary>
+          <div class="meta">#${e.num} · ${PRIO_ICON[e.prio]} ${e.prio} · ${STATES[e.estado] || ''} ${esc(e.estado)} · ${esc(e.fecha.slice(0, 10))}${stale ? ' · <span class="stale">sin movimiento</span>' : ''}</div>
+          <div>${esc(first)}</div>
+        </summary>
+        <div class="body">${esc(e.body.slice(1).join('\n').trim())}</div>
+        <div class="actions">
+          ${e.estado !== 'en curso' ? `<button class="small" data-num="${e.num}" data-to="en curso">🟡 En curso</button>` : ''}
+          ${e.estado !== 'en espera' ? `<button class="small" data-num="${e.num}" data-to="en espera">⏸️ En espera</button>` : ''}
+          <button class="small" data-num="${e.num}" data-to="cerrada">✅ Cerrar</button>
+        </div>
+      </details>`;
+    }).join('');
+  }
+
+  function renderInbox(text) {
+    const lines = text.split('\n').filter((l) => l.startsWith('- '));
+    $('#inbox-count').textContent = lines.length ? `(${lines.length})` : '';
+    $('#inbox').innerHTML = lines.length
+      ? `<ul class="inbox">${lines.map((l) => `<li>${esc(l.slice(2))}</li>`).join('')}</ul>`
+      : '<p class="empty">Vacía. Claude procesa la bandeja al abrir sesión.</p>';
+  }
+
+  async function refresh() {
+    msg($('#add-msg'), 'Cargando…');
+    try {
+      const [inbox, diary] = await Promise.all([getFile(INBOX), getFile(DIARY)]);
+      renderInbox(inbox.text);
+      renderOpen(parseDiary(diary.text));
+      msg($('#add-msg'), '');
+    } catch (err) {
+      msg($('#add-msg'), err.message, 'err');
+    }
+  }
+
+  // ---------- acciones ----------
+  async function add(text) {
+    const btn = $('#btn-add');
+    btn.disabled = true;
+    msg($('#add-msg'), 'Guardando…');
+    try {
+      await appendToInbox(`- ${madridNow()} · ${text}`);
+      msg($('#add-msg'), 'Anotado ✓', 'ok');
+      await refresh();
+      msg($('#add-msg'), 'Anotado ✓', 'ok');
+      return true;
+    } catch (err) {
+      msg($('#add-msg'), err.message, 'err');
+      return false;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  $('#btn-add').addEventListener('click', async () => {
+    const raw = $('#txt').value.trim();
+    if (!raw) return;
+    const text = raw.replace(/\s*\n+\s*/g, ' / ') + ($('#chk-urgent').checked ? ' · 🔴 urgente' : '');
+    if (await add(text)) {
+      $('#txt').value = '';
+      $('#chk-urgent').checked = false;
+      store.del(DRAFT_KEY);
+    }
+  });
+
+  $('#txt').addEventListener('input', () => store.set(DRAFT_KEY, $('#txt').value));
+  $('#txt').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('#btn-add').click(); });
+
+  $('#open').addEventListener('click', async (e) => {
+    const b = e.target.closest('button[data-num]');
+    if (!b) return;
+    b.disabled = true;
+    await add(`la #${b.dataset.num} pasa a ${b.dataset.to}`);
+  });
+
+  $('#btn-refresh').addEventListener('click', refresh);
+
+  $('#btn-reset').addEventListener('click', () => {
+    if (!confirm('Se borrarán el token y la configuración de este dispositivo. ¿Seguir?')) return;
+    store.del(CFG_KEY);
+    location.reload();
+  });
+
+  $('#btn-save').addEventListener('click', async () => {
+    const repo = $('#cfg-repo').value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/+$/, '');
+    const tok = $('#cfg-token').value.trim();
+    const pin = $('#cfg-pin').value;
+    const out = $('#setup-msg');
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || !tok) { msg(out, 'Falta el repositorio o el token.', 'err'); return; }
+    msg(out, 'Comprobando acceso…');
+    cfg = { repo };
+    token = tok;
+    try {
+      const res = await gh('');
+      if (!res.ok) throw new Error(res.status === 404 || res.status === 401
+        ? 'GitHub no da acceso a ese repositorio con ese token.' : `GitHub respondió ${res.status}`);
+      const repoInfo = await res.json();
+      if (!repoInfo.permissions || !repoInfo.permissions.push) throw new Error('El token puede leer pero no escribir. Dale permiso de escritura en «Contents».');
+      if (pin) cfg.enc = await encryptToken(tok, pin); else cfg.token = tok;
+      store.set(CFG_KEY, JSON.stringify(cfg));
+      $('#cfg-token').value = ''; $('#cfg-pin').value = '';
+      startApp();
+    } catch (err) {
+      cfg = null; token = null;
+      msg(out, err.message, 'err');
+    }
+  });
+
+  $('#btn-unlock').addEventListener('click', async () => {
+    try {
+      token = await decryptToken(cfg.enc, $('#lock-pin').value);
+      $('#lock-pin').value = '';
+      startApp();
+    } catch {
+      msg($('#lock-msg'), 'PIN incorrecto.', 'err');
+    }
+  });
+  $('#lock-pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#btn-unlock').click(); });
+
+  function startApp() {
+    show('app');
+    $('#txt').value = store.get(DRAFT_KEY) || '';
+    refresh();
+  }
+
+  // ---------- arranque ----------
+  try { cfg = JSON.parse(store.get(CFG_KEY) || 'null'); } catch { cfg = null; }
+  if (!cfg) show('setup');
+  else if (cfg.enc) { show('lock'); $('#lock-pin').focus(); }
+  else { token = cfg.token; startApp(); }
+})();
+</script>
+</body>
+</html>
