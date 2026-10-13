@@ -63,6 +63,13 @@
   .inbox li { font-size: 14px; margin: 4px 0; }
   .inbox { padding-left: 18px; margin: 0; }
   .empty { color: var(--muted); font-size: 14px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; }
+  .chip {
+    font-size: 13px; padding: 4px 10px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--card); color: var(--text);
+  }
+  .chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .tag { color: var(--accent); }
   .hidden { display: none !important; }
   .help { font-size: 14px; color: var(--muted); }
   .help a { color: var(--accent); }
@@ -104,6 +111,7 @@
   <!-- Aplicación -->
   <section id="view-app" class="hidden">
     <div class="card">
+      <div id="tags" class="chips"></div>
       <textarea id="txt" placeholder="Escribe o dicta con el micrófono del teclado…"></textarea>
       <div class="row">
         <label class="toggle"><input type="checkbox" id="chk-urgent"> 🔴 Urgente</label>
@@ -117,6 +125,7 @@
     <div id="inbox"></div>
 
     <h2>Abiertas</h2>
+    <div id="filter" class="chips"></div>
     <div id="open" class="list"></div>
 
     <div class="row" style="margin-top:28px">
@@ -135,10 +144,15 @@
   const PRIOS = ['alta', 'media', 'baja'];
   const PRIO_ICON = { alta: '🔴', media: '🟠', baja: '🟢' };
   const STALE_DAYS = 14;
+  const TAG_KEY = 'diario-etiqueta';
+  const EXTRA_TAGS_KEY = 'diario-etiquetas-nuevas';
 
   const $ = (s) => document.querySelector(s);
   let cfg = null;
   let token = null;
+  let entries = [];
+  let selTag = null;     // etiqueta elegida para la próxima anotación
+  let filterTag = null;  // etiqueta por la que se filtran las abiertas
 
   // ---------- almacenamiento local ----------
   const store = {
@@ -229,9 +243,10 @@
     const entries = [];
     let cur = null;
     for (const line of text.split('\n')) {
-      const m = line.match(/^### #(\d+) · (.+?) · (.+?) · (.+)$/);
+      const m = line.match(/^### #(\d+) · (.+?) · (.+?) · (.+?)(?: · (.+))?$/);
       if (m) {
-        cur = { num: m[1], fecha: m[2].trim(), estadoRaw: m[3].trim(), prioRaw: m[4].trim(), body: [] };
+        cur = { num: m[1], fecha: m[2].trim(), estadoRaw: m[3].trim(), prioRaw: m[4].trim(), body: [],
+          tags: [...(m[5] || '').matchAll(/\[([\w-]+)\]/g)].map((x) => x[1]) };
         cur.estado = Object.keys(STATES).find((k) => cur.estadoRaw.includes(k)) || cur.estadoRaw;
         cur.prio = PRIOS.find((k) => cur.prioRaw.includes(k)) || 'media';
         entries.push(cur);
@@ -252,18 +267,68 @@
     return Math.floor((Date.now() - d.getTime()) / 86400000);
   }
 
-  function renderOpen(entries) {
+  // ---------- etiquetas ----------
+  function knownTags() {
+    let extra = [];
+    try { extra = JSON.parse(store.get(EXTRA_TAGS_KEY) || '[]'); } catch {}
+    return [...new Set([...entries.flatMap((e) => e.tags), ...extra])].sort();
+  }
+
+  function chipsHtml(tags, active, allLabel) {
+    const all = allLabel ? [`<button class="chip${active ? '' : ' on'}" data-tag="">${allLabel}</button>`] : [];
+    return all.concat(tags.map((t) => `<button class="chip${t === active ? ' on' : ''}" data-tag="${esc(t)}">${esc(t)}</button>`)).join('');
+  }
+
+  function renderTags() {
+    const tags = knownTags();
+    if (selTag && !tags.includes(selTag)) tags.push(selTag);
+    $('#tags').innerHTML = chipsHtml(tags, selTag, 'sin etiqueta') + '<button class="chip" data-new="1">＋ nueva</button>';
+    const used = [...new Set(entries.filter(isOpen).flatMap((e) => e.tags))].sort();
+    $('#filter').innerHTML = used.length > 1 ? chipsHtml(used, filterTag, 'todas') : '';
+  }
+
+  $('#tags').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.new) {
+      const raw = prompt('Nombre de la etiqueta (por ejemplo cactus-poem):');
+      const t = (raw || '').trim().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w-]+/g, '-').replace(/^-+|-+$/g, '');
+      if (!t) return;
+      let extra = [];
+      try { extra = JSON.parse(store.get(EXTRA_TAGS_KEY) || '[]'); } catch {}
+      if (!extra.includes(t)) store.set(EXTRA_TAGS_KEY, JSON.stringify([...extra, t]));
+      selTag = t;
+    } else {
+      selTag = b.dataset.tag || null;
+    }
+    if (selTag) store.set(TAG_KEY, selTag); else store.del(TAG_KEY);
+    renderTags();
+  });
+
+  $('#filter').addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    filterTag = b.dataset.tag || null;
+    renderTags();
+    renderOpen();
+  });
+
+  const isOpen = (e) => e.estado !== 'cerrada' && e.estado !== 'nota';
+
+  function renderOpen() {
     const open = entries
-      .filter((e) => e.estado !== 'cerrada' && e.estado !== 'nota')
+      .filter(isOpen)
+      .filter((e) => !filterTag || e.tags.includes(filterTag))
       .sort((a, b) => PRIOS.indexOf(a.prio) - PRIOS.indexOf(b.prio) || a.fecha.localeCompare(b.fecha));
     const box = $('#open');
     if (!open.length) { box.innerHTML = '<p class="empty">Nada abierto.</p>'; return; }
     box.innerHTML = open.map((e) => {
       const first = (e.body.find((l) => l.trim()) || '').trim();
       const stale = daysSince(e.lastMove) > STALE_DAYS;
+      const tags = e.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join(' ');
       return `<details class="item">
         <summary>
-          <div class="meta">#${e.num} · ${PRIO_ICON[e.prio]} ${e.prio} · ${STATES[e.estado] || ''} ${esc(e.estado)} · ${esc(e.fecha.slice(0, 10))}${stale ? ' · <span class="stale">sin movimiento</span>' : ''}</div>
+          <div class="meta">#${e.num} · ${PRIO_ICON[e.prio]} ${e.prio} · ${STATES[e.estado] || ''} ${esc(e.estado)} · ${esc(e.fecha.slice(0, 10))}${tags ? ' · ' + tags : ''}${stale ? ' · <span class="stale">sin movimiento</span>' : ''}</div>
           <div>${esc(first)}</div>
         </summary>
         <div class="body">${esc(e.body.slice(1).join('\n').trim())}</div>
@@ -288,8 +353,11 @@
     msg($('#add-msg'), 'Cargando…');
     try {
       const [inbox, diary] = await Promise.all([getFile(INBOX), getFile(DIARY)]);
+      entries = parseDiary(diary.text);
+      if (filterTag && !entries.some((e) => isOpen(e) && e.tags.includes(filterTag))) filterTag = null;
       renderInbox(inbox.text);
-      renderOpen(parseDiary(diary.text));
+      renderTags();
+      renderOpen();
       msg($('#add-msg'), '');
     } catch (err) {
       msg($('#add-msg'), err.message, 'err');
@@ -318,7 +386,7 @@
   $('#btn-add').addEventListener('click', async () => {
     const raw = $('#txt').value.trim();
     if (!raw) return;
-    const text = raw.replace(/\s*\n+\s*/g, ' / ') + ($('#chk-urgent').checked ? ' · 🔴 urgente' : '');
+    const text = (selTag ? `[${selTag}] ` : '') + raw.replace(/\s*\n+\s*/g, ' / ') + ($('#chk-urgent').checked ? ' · 🔴 urgente' : '');
     if (await add(text)) {
       $('#txt').value = '';
       $('#chk-urgent').checked = false;
@@ -383,6 +451,8 @@
   function startApp() {
     show('app');
     $('#txt').value = store.get(DRAFT_KEY) || '';
+    selTag = store.get(TAG_KEY) || null;
+    renderTags();
     refresh();
   }
 
