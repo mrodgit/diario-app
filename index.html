@@ -406,28 +406,49 @@
     rec.lang = 'es-ES';
     rec.continuous = true;
     rec.interimResults = true;
-    let listening = false;
+    // Chrome en Android corta el reconocimiento en cada pausa aunque sea continuo:
+    // mientras m. no lo pare, se vuelve a encender solo y sigue a partir de lo ya dictado.
+    const MAX_SILENT_RESTARTS = 4;
+    let wanted = false;          // m. quiere seguir dictando
     let base = '';
     let autoSubmit = false;
+    let heard = false;           // ha llegado algo en esta vuelta
+    let silentRestarts = 0;
     // «anótalo», «anótalo urgente» o «fin de nota» al final del dictado anotan sin tocar la pantalla.
     const TRIGGER = /(?:^|[\s,.;:¡!]+)(?:an[oó]talo|fin de nota)(\s+urgente)?[\s.,;:!¡]*$/i;
-    mic.classList.remove('hidden');
-    mic.addEventListener('click', () => {
-      if (listening) { rec.stop(); return; }
-      const cur = $('#txt').value;
-      base = cur && !/\s$/.test(cur) ? cur + ' ' : cur;
-      try { rec.start(); } catch {}
-    });
-    rec.onstart = () => { listening = true; autoSubmit = false; mic.classList.add('rec'); msg($('#add-msg'), 'Escuchando… di «anótalo» al terminar, o pulsa 🎤 para parar.'); };
-    rec.onend = () => {
-      listening = false;
+    const withSpace = (s) => (s && !/\s$/.test(s) ? s + ' ' : s);
+
+    function stopUi() {
       mic.classList.remove('rec');
       store.set(DRAFT_KEY, $('#txt').value);
       if ($('#add-msg').textContent.startsWith('Escuchando')) msg($('#add-msg'), '');
-      if (autoSubmit) { autoSubmit = false; $('#btn-add').click(); }
+    }
+
+    mic.classList.remove('hidden');
+    mic.addEventListener('click', () => {
+      if (wanted) { wanted = false; rec.stop(); return; }
+      wanted = true;
+      autoSubmit = false;
+      silentRestarts = 0;
+      base = withSpace($('#txt').value);
+      mic.classList.add('rec');
+      msg($('#add-msg'), 'Escuchando… di «anótalo» al terminar, o pulsa 🎤 para parar.');
+      try { rec.start(); } catch {}
+    });
+    rec.onstart = () => { heard = false; };
+    rec.onend = () => {
+      if (autoSubmit) { wanted = false; autoSubmit = false; stopUi(); $('#btn-add').click(); return; }
+      silentRestarts = heard ? 0 : silentRestarts + 1;
+      if (wanted && silentRestarts <= MAX_SILENT_RESTARTS) {
+        base = withSpace($('#txt').value);
+        try { rec.start(); return; } catch {}
+      }
+      wanted = false;
+      stopUi();
     };
     rec.onresult = (ev) => {
       if (autoSubmit) return;
+      heard = true;
       // Chrome en Android repite en cada resultado todo lo anterior: si un trozo empieza
       // por el anterior, lo sustituye en vez de sumarse.
       const parts = [];
@@ -451,6 +472,8 @@
       $('#txt').value = base + text;
     };
     rec.onerror = (ev) => {
+      if (ev.error === 'no-speech' || ev.error === 'aborted') return; // silencio: lo gestiona onend
+      wanted = false;
       const why = { 'not-allowed': 'El navegador no tiene permiso para usar el micrófono.',
         'service-not-allowed': 'El navegador no tiene permiso para usar el micrófono.',
         'no-speech': 'No se ha oído nada.', 'audio-capture': 'No se encuentra el micrófono.',
