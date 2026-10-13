@@ -428,9 +428,18 @@
     };
     rec.onresult = (ev) => {
       if (autoSubmit) return;
-      let text = '';
-      for (const r of ev.results) text += r[0].transcript;
-      text = text.trim();
+      // Chrome en Android repite en cada resultado todo lo anterior: si un trozo empieza
+      // por el anterior, lo sustituye en vez de sumarse.
+      const parts = [];
+      for (const r of ev.results) {
+        const t = r[0].transcript.trim();
+        if (!t) continue;
+        const prev = parts[parts.length - 1];
+        if (prev && t.toLowerCase().startsWith(prev.toLowerCase())) parts[parts.length - 1] = t;
+        else if (prev && prev.toLowerCase().startsWith(t.toLowerCase())) continue;
+        else parts.push(t);
+      }
+      let text = parts.join(' ');
       const last = ev.results[ev.results.length - 1];
       const m = last && last.isFinal ? text.match(TRIGGER) : null;
       if (m) {
