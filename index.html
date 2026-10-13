@@ -70,6 +70,9 @@
   }
   .chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
   .tag { color: var(--accent); }
+  #btn-mic.rec { background: var(--danger); border-color: var(--danger); color: #fff; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .6; } }
+  @media (prefers-reduced-motion: reduce) { #btn-mic.rec { animation: none; } }
   .hidden { display: none !important; }
   .help { font-size: 14px; color: var(--muted); }
   .help a { color: var(--accent); }
@@ -116,6 +119,7 @@
       <div class="row">
         <label class="toggle"><input type="checkbox" id="chk-urgent"> 🔴 Urgente</label>
         <span class="grow"></span>
+        <button class="hidden" id="btn-mic" title="Dictar">🎤</button>
         <button class="primary" id="btn-add">Anotar</button>
       </div>
       <div class="msg" id="add-msg"></div>
@@ -393,6 +397,44 @@
       store.del(DRAFT_KEY);
     }
   });
+
+  // ---------- dictado por voz (Chrome y Edge) ----------
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (SR) {
+    const mic = $('#btn-mic');
+    const rec = new SR();
+    rec.lang = 'es-ES';
+    rec.continuous = true;
+    rec.interimResults = true;
+    let listening = false;
+    let base = '';
+    mic.classList.remove('hidden');
+    mic.addEventListener('click', () => {
+      if (listening) { rec.stop(); return; }
+      const cur = $('#txt').value;
+      base = cur && !/\s$/.test(cur) ? cur + ' ' : cur;
+      try { rec.start(); } catch {}
+    });
+    rec.onstart = () => { listening = true; mic.classList.add('rec'); msg($('#add-msg'), 'Escuchando… pulsa 🎤 otra vez para parar.'); };
+    rec.onend = () => {
+      listening = false;
+      mic.classList.remove('rec');
+      store.set(DRAFT_KEY, $('#txt').value);
+      if ($('#add-msg').textContent.startsWith('Escuchando')) msg($('#add-msg'), '');
+    };
+    rec.onresult = (ev) => {
+      let text = '';
+      for (const r of ev.results) text += r[0].transcript;
+      $('#txt').value = base + text.trim();
+    };
+    rec.onerror = (ev) => {
+      const why = { 'not-allowed': 'El navegador no tiene permiso para usar el micrófono.',
+        'service-not-allowed': 'El navegador no tiene permiso para usar el micrófono.',
+        'no-speech': 'No se ha oído nada.', 'audio-capture': 'No se encuentra el micrófono.',
+        'network': 'No hay conexión con el servicio de reconocimiento de voz.' }[ev.error];
+      msg($('#add-msg'), why || `Error de dictado: ${ev.error}`, 'err');
+    };
+  }
 
   $('#txt').addEventListener('input', () => store.set(DRAFT_KEY, $('#txt').value));
   $('#txt').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('#btn-add').click(); });
