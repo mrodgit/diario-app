@@ -408,6 +408,9 @@
     rec.interimResults = true;
     let listening = false;
     let base = '';
+    let autoSubmit = false;
+    // «anótalo», «anótalo urgente» o «fin de nota» al final del dictado anotan sin tocar la pantalla.
+    const TRIGGER = /(?:^|[\s,.;:¡!]+)(?:an[oó]talo|fin de nota)(\s+urgente)?[\s.,;:!¡]*$/i;
     mic.classList.remove('hidden');
     mic.addEventListener('click', () => {
       if (listening) { rec.stop(); return; }
@@ -415,17 +418,28 @@
       base = cur && !/\s$/.test(cur) ? cur + ' ' : cur;
       try { rec.start(); } catch {}
     });
-    rec.onstart = () => { listening = true; mic.classList.add('rec'); msg($('#add-msg'), 'Escuchando… pulsa 🎤 otra vez para parar.'); };
+    rec.onstart = () => { listening = true; autoSubmit = false; mic.classList.add('rec'); msg($('#add-msg'), 'Escuchando… di «anótalo» al terminar, o pulsa 🎤 para parar.'); };
     rec.onend = () => {
       listening = false;
       mic.classList.remove('rec');
       store.set(DRAFT_KEY, $('#txt').value);
       if ($('#add-msg').textContent.startsWith('Escuchando')) msg($('#add-msg'), '');
+      if (autoSubmit) { autoSubmit = false; $('#btn-add').click(); }
     };
     rec.onresult = (ev) => {
+      if (autoSubmit) return;
       let text = '';
       for (const r of ev.results) text += r[0].transcript;
-      $('#txt').value = base + text.trim();
+      text = text.trim();
+      const last = ev.results[ev.results.length - 1];
+      const m = last && last.isFinal ? text.match(TRIGGER) : null;
+      if (m) {
+        text = text.slice(0, m.index).trim();
+        if (m[1]) $('#chk-urgent').checked = true;
+        autoSubmit = !!(base + text).trim();
+        rec.stop();
+      }
+      $('#txt').value = base + text;
     };
     rec.onerror = (ev) => {
       const why = { 'not-allowed': 'El navegador no tiene permiso para usar el micrófono.',
