@@ -113,7 +113,7 @@
       <input id="cfg-token" type="password" placeholder="github_pat_…" autocomplete="off">
       <label for="cfg-pin">PIN (opcional)</label>
       <input id="cfg-pin" type="password" inputmode="numeric" placeholder="Vacío = sin PIN" autocomplete="off">
-      <p class="help">Con PIN, el token se guarda cifrado y la aplicación lo pide al abrirse.</p>
+      <p class="help">Con PIN, el token, la copia del diario y lo pendiente de enviar se guardan cifrados, y la aplicación pide el PIN al abrirse.</p>
       <div class="row"><button class="primary grow" id="btn-save">Guardar y comprobar</button></div>
       <div class="msg" id="setup-msg"></div>
     </div>
@@ -177,7 +177,7 @@
 
 <script>
 (() => {
-  const VERSION = '2026-10-14 22:48';   // cámbiala en cada cambio publicado
+  const VERSION = '2026-10-14 23:33';   // cámbiala en cada cambio publicado
   const CFG_KEY = 'diario-cfg';
   const DRAFT_KEY = 'diario-borrador';
   const INBOX = 'entrada.md';
@@ -201,6 +201,8 @@
   $('#version').textContent = 'versión ' + VERSION;
   let cfg = null;
   let token = null;
+  let dataKey = null;    // clave del PIN, solo en memoria (null = sin PIN)
+  let queue = [];        // anotaciones pendientes de enviar
   let entries = [];
   let selTag = null;     // etiqueta elegida para la próxima anotación
   let selType = null;    // tipo elegido para la próxima anotación (null = lo deduce Claude)
@@ -237,23 +239,42 @@
 
   function msg(el, text, kind) { el.textContent = text || ''; el.className = 'msg' + (kind ? ' ' + kind : ''); }
 
-  // ---------- cifrado opcional del token ----------
+  // ---------- cifrado opcional con PIN ----------
+  // La clave sale del PIN y se queda en memoria tras desbloquear: cifra el token y todo
+  // lo que la app guarda en el navegador (copia del diario, cola, borrador).
   async function deriveKey(pin, salt) {
     const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
     return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: 200000, hash: 'SHA-256' },
       base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
   }
-  async function encryptToken(tok, pin) {
-    const salt = crypto.getRandomValues(new Uint8Array(16));
+  async function encryptWith(key, text) {
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const key = await deriveKey(pin, salt);
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(tok)));
-    return { salt: b64.fromBytes(salt), iv: b64.fromBytes(iv), ct: b64.fromBytes(ct) };
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(text)));
+    return { iv: b64.fromBytes(iv), ct: b64.fromBytes(ct) };
   }
-  async function decryptToken(enc, pin) {
-    const key = await deriveKey(pin, b64.toBytes(enc.salt));
-    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64.toBytes(enc.iv) }, key, b64.toBytes(enc.ct));
+  async function decryptWith(key, { iv, ct }) {
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64.toBytes(iv) }, key, b64.toBytes(ct));
     return new TextDecoder().decode(pt);
+  }
+
+  // ---------- datos guardados en el navegador ----------
+  // Con PIN se guardan cifrados (prefijo «enc:»); sin PIN, en claro, igual que el token.
+  // Lo que versiones anteriores dejaron en claro se sigue leyendo y se cifra al volver a guardarlo.
+  const ENC = 'enc:';
+  async function loadData(k) {
+    const raw = store.get(k);
+    if (raw === null || !raw.startsWith(ENC)) return raw;
+    if (!dataKey) return null;
+    try { return await decryptWith(dataKey, JSON.parse(raw.slice(ENC.length))); } catch { return null; }
+  }
+  // Las escrituras van en fila para que una antigua no pise a una más reciente.
+  let writes = Promise.resolve();
+  function persist(k, v) {
+    writes = writes.then(async () => {
+      if (v === null) store.del(k);
+      else store.set(k, dataKey ? ENC + JSON.stringify(await encryptWith(dataKey, v)) : v);
+    }).catch(() => {});
+    return writes;
   }
 
   // ---------- GitHub ----------
@@ -306,8 +327,8 @@
   }
 
   // ---------- cola de envío (anotaciones escritas sin conexión) ----------
-  function loadQueue() { try { return JSON.parse(store.get(QUEUE_KEY) || '[]'); } catch { return []; } }
-  function saveQueue(q) { if (q.length) store.set(QUEUE_KEY, JSON.stringify(q)); else store.del(QUEUE_KEY); renderQueue(); }
+  function loadQueue() { return queue; }
+  function saveQueue(q) { queue = q; persist(QUEUE_KEY, q.length ? JSON.stringify(q) : null); renderQueue(); }
 
   function renderQueue() {
     const q = loadQueue();
@@ -633,14 +654,14 @@
     try {
       const [inbox, diary] = await Promise.all([getFile(INBOX), getFile(DIARY)]);
       offline = false;
-      store.set(COPY_KEY, JSON.stringify({ inbox: inbox.text, diary: diary.text, at: madridNow() }));
+      persist(COPY_KEY, JSON.stringify({ inbox: inbox.text, diary: diary.text, at: madridNow() }));
       draw(inbox.text, diary.text);
       msg($('#add-msg'), '');
     } catch (err) {
       if (!err.offline) { msg($('#add-msg'), err.message, 'err'); return; }
       offline = true;
       let copy = null;
-      try { copy = JSON.parse(store.get(COPY_KEY) || 'null'); } catch {}
+      try { copy = JSON.parse(await loadData(COPY_KEY) || 'null'); } catch {}
       if (copy) draw(copy.inbox, copy.diary);
       else drawInbox();
       msg($('#add-msg'), copy ? `Sin conexión: datos de ${copy.at}. Lo que anotes se enviará al volver la red.`
@@ -716,7 +737,7 @@
       $('#rep').value = '';
       selType = null;
       renderTypes();
-      store.del(DRAFT_KEY);
+      persist(DRAFT_KEY, null);
     }
   });
 
@@ -761,7 +782,7 @@
 
     function stopUi() {
       mic.classList.remove('rec');
-      store.set(DRAFT_KEY, $('#txt').value);
+      persist(DRAFT_KEY, $('#txt').value);
       if ($('#add-msg').textContent.startsWith('Escuchando')) msg($('#add-msg'), '');
     }
 
@@ -823,7 +844,7 @@
     };
   }
 
-  $('#txt').addEventListener('input', () => store.set(DRAFT_KEY, $('#txt').value));
+  $('#txt').addEventListener('input', () => persist(DRAFT_KEY, $('#txt').value));
   $('#txt').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('#btn-add').click(); });
 
   for (const id of ['#open', '#reminders', '#ideas']) {
@@ -837,9 +858,19 @@
 
   $('#btn-refresh').addEventListener('click', refresh);
 
-  $('#btn-reset').addEventListener('click', () => {
-    if (!confirm('Se borrarán el token y la configuración de este dispositivo. ¿Seguir?')) return;
-    store.del(CFG_KEY);
+  // Borra todo lo de la app en este navegador: configuración, token, copia del diario, cola,
+  // borrador, etiquetas, la caché sin conexión y el service worker. Solo lo suyo: el dominio
+  // de GitHub Pages puede tener otras aplicaciones.
+  $('#btn-reset').addEventListener('click', async () => {
+    const pending = queue.length ? `\n\nOjo: hay ${queue.length} anotación(es) sin enviar que se perderán.` : '';
+    if (!confirm(`Se borrarán de este dispositivo el token, la configuración, la copia del diario y el borrador.${pending}\n\n¿Seguir?`)) return;
+    await writes;
+    try { for (const k of Object.keys(localStorage)) if (k.startsWith('diario-')) localStorage.removeItem(k); } catch {}
+    try { await caches.delete('diario-app'); } catch {}
+    try {
+      const scope = new URL('./', location.href).href;
+      for (const r of await navigator.serviceWorker.getRegistrations()) if (r.scope === scope) await r.unregister();
+    } catch {}
     location.reload();
   });
 
@@ -858,30 +889,46 @@
         ? 'GitHub no da acceso a ese repositorio con ese token.' : `GitHub respondió ${res.status}`);
       const repoInfo = await res.json();
       if (!repoInfo.permissions || !repoInfo.permissions.push) throw new Error('El token puede leer pero no escribir. Dale permiso de escritura en «Contents».');
-      if (pin) cfg.enc = await encryptToken(tok, pin); else cfg.token = tok;
+      if (pin) {
+        const salt = crypto.getRandomValues(new Uint8Array(16));
+        dataKey = await deriveKey(pin, salt);
+        cfg.enc = { salt: b64.fromBytes(salt), ...await encryptWith(dataKey, tok) };
+      } else {
+        cfg.token = tok;
+      }
       store.set(CFG_KEY, JSON.stringify(cfg));
       $('#cfg-token').value = ''; $('#cfg-pin').value = '';
       startApp();
     } catch (err) {
-      cfg = null; token = null;
+      cfg = null; token = null; dataKey = null;
       msg(out, err.message, 'err');
     }
   });
 
   $('#btn-unlock').addEventListener('click', async () => {
     try {
-      token = await decryptToken(cfg.enc, $('#lock-pin').value);
+      dataKey = await deriveKey($('#lock-pin').value, b64.toBytes(cfg.enc.salt));
+      token = await decryptWith(dataKey, cfg.enc);
       $('#lock-pin').value = '';
-      startApp();
     } catch {
+      dataKey = null;
       msg($('#lock-msg'), 'PIN incorrecto.', 'err');
+      return;
     }
+    startApp();
   });
   $('#lock-pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#btn-unlock').click(); });
 
-  function startApp() {
+  async function startApp() {
+    // Carga lo guardado y lo vuelve a guardar: con PIN, lo que quedó en claro se cifra ya
+    try { queue = JSON.parse(await loadData(QUEUE_KEY) || '[]'); } catch { queue = []; }
+    persist(QUEUE_KEY, queue.length ? JSON.stringify(queue) : null);
+    const copy = await loadData(COPY_KEY);
+    if (copy !== null) persist(COPY_KEY, copy);
+    const draft = await loadData(DRAFT_KEY) || '';
+    persist(DRAFT_KEY, draft || null);
     show('app');
-    $('#txt').value = store.get(DRAFT_KEY) || '';
+    $('#txt').value = draft;
     selTag = store.get(TAG_KEY) || null;
     renderTypes();
     renderTags();
