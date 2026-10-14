@@ -88,6 +88,8 @@
     margin-top: 10px; padding: 10px 12px; border-radius: 10px; font-size: 14px;
     background: var(--card); border: 1px solid var(--accent); }
   .hidden { display: none !important; }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .hint:empty { display: none; }
   .help { font-size: 14px; color: var(--muted); }
   .help a { color: var(--accent); }
 </style>
@@ -136,6 +138,7 @@
       <div id="types" class="chips"></div>
       <textarea id="txt" placeholder="Escribe o dicta con el micrófono del teclado…"></textarea>
       <input id="rep" class="hidden" placeholder="🔁 Repetición (opcional): cada lunes, días 1 y 15 hasta fin de año…" autocomplete="off" style="margin-top:8px">
+      <div class="hint" id="hint"></div>
       <div class="row">
         <label class="toggle" id="lbl-urgent"><input type="checkbox" id="chk-urgent"> 🔴 Urgente</label>
         <label class="toggle" id="lbl-due" title="Fecha límite (opcional)">⏳ <input type="date" id="due"></label>
@@ -177,7 +180,7 @@
 
 <script>
 (() => {
-  const VERSION = '2026-10-14 23:33';   // cámbiala en cada cambio publicado
+  const VERSION = '2026-10-14 23:58';   // cámbiala en cada cambio publicado
   const CFG_KEY = 'diario-cfg';
   const DRAFT_KEY = 'diario-borrador';
   const INBOX = 'entrada.md';
@@ -462,6 +465,115 @@
     return e.due;
   }
 
+  // ---------- dictado más listo: tipo, fecha y repetición a partir del texto ----------
+  // interpret(texto, hoy) solo propone: lo que m. elige a mano manda, y el texto se envía tal cual.
+  const MONTHS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+  const WD = WEEKDAYS.map((w) => w.normalize('NFD').replace(/[̀-ͯ]/g, ''));   // sin tildes, para comparar
+  const NUMS = ['', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve', 'diez', 'once', 'doce', 'trece',
+    'catorce', 'quince', 'dieciseis', 'diecisiete', 'dieciocho', 'diecinueve', 'veinte', 'veintiuno', 'veintidos', 'veintitres',
+    'veinticuatro', 'veinticinco', 'veintiseis', 'veintisiete', 'veintiocho', 'veintinueve', 'treinta'];
+  // El tipo solo se reconoce por cómo empieza la frase («hablar de la reunión» no es una reunión).
+  const TYPE_CUES = [
+    ['recordatorio', /^(recuerdame|recordatorio|acuerdate|avisame)\b/],
+    ['reunión', /^(reunion|quedamos|quedada|cita)\b/],
+    ['idea', /^(idea|se me ocurre)\b/],
+    ['nota', /^(nota|apunta que|para que conste)\b/],
+  ];
+  const MES = MONTHS.join('|');
+  const WDRE = WD.join('|');
+  const NEXT_WEEK = /\b(la semana que viene|la proxima semana|la semana proxima)\b/;
+  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  const nextWd = (today, wd) => addDays(today, ((wd - today.getDay() + 7) % 7) || 7);   // «el lunes» dicho un lunes = el siguiente
+  const lastOfMonth = (d) => new Date(d.getFullYear(), d.getMonth() + 1, 0, 12);
+
+  // Día n: este mes si aún no ha pasado y si no el siguiente; con mes, este año o el que viene.
+  // Devuelve null si ese día no existe (31 de noviembre).
+  function dayDate(today, n, month = null, year = null) {
+    if (n < 1 || n > 31) return null;
+    let m = month === null ? today.getMonth() + (n < today.getDate() ? 1 : 0) : month;
+    let d = new Date(year || today.getFullYear(), m, n, 12);
+    if (month !== null && !year && d < today) d = new Date(today.getFullYear() + 1, m, n, 12);
+    return d.getDate() === n ? d : null;
+  }
+
+  function digits(s) {
+    s = s.replace(/\btreinta y uno\b/g, '31').replace(/\bprimero\b/g, '1')
+      .replace(/\b(un|una)\b(?= (dias?|semanas?|mes|meses)\b)/g, '1');
+    for (let n = NUMS.length - 1; n >= 1; n--) s = s.replace(new RegExp(`\\b${NUMS[n]}\\b`, 'g'), String(n));
+    return s;
+  }
+
+  function interpret(text, todayIso) {
+    const today = toDate(todayIso);
+    let s = digits(text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')).replace(/^[\s¡¿"«'-]+/, '');
+    const out = { tipo: null, due: null, rep: null, urgent: false, warn: null };
+    for (const [t, re] of TYPE_CUES) if (re.test(s)) { out.tipo = t; break; }
+    out.urgent = /\b(urgente|urgentemente|cuanto antes)\b/.test(s);
+
+    // Repetición. Se quita del texto para que «los días 1 y 15» no se lea además como fecha.
+    let m;
+    const cut = (re) => { const x = s.match(re); if (x) s = s.replace(re, ' '); return x; };
+    let rule = null;
+    if (cut(/\b(cada dia|todos los dias|a diario)\b/)) rule = 'cada día';
+    else if ((m = cut(new RegExp(`\\b(?:cada|todos los) ((?:${WDRE})s?(?:(?:,| y) (?:${WDRE})s?)*)\\b`)))) {
+      const days = WD.map((w, i) => (new RegExp(`\\b${w}s?\\b`).test(m[1]) ? WEEKDAYS[i] : null)).filter(Boolean);
+      rule = 'cada ' + days.join(' y ');
+    }
+    else if (cut(/\b(cada semana|todas las semanas)\b/)) rule = 'cada semana';
+    else if (cut(/\b(cada mes|todos los meses)\b/)) rule = 'cada mes';
+    else if ((m = cut(/\b(?:todos )?los dias (\d{1,2}(?:\s*(?:,|y|, y)\s*\d{1,2})*)(?: de cada mes)?/))) {
+      rule = 'días ' + m[1].match(/\d+/g).join(', ');
+    }
+    if (rule) {
+      let until = null;
+      if ((m = cut(new RegExp(`\\bhasta (?:el )?(?:(?:fin|final) del? (ano|mes)|(?:dia )?(\\d{1,2}) de (${MES})(?: de (\\d{4}))?)`)))) {
+        until = m[1] === 'ano' ? new Date(today.getFullYear(), 11, 31, 12) : m[1] === 'mes' ? lastOfMonth(today)
+          : dayDate(today, +m[2], MONTHS.indexOf(m[3]), m[4] ? +m[4] : null);
+      }
+      if (!out.tipo || out.tipo === 'recordatorio') {
+        out.tipo = 'recordatorio';
+        out.rep = rule + (until ? ` hasta ${toIso(until)}` : '');
+      }
+    }
+
+    // Fecha: la primera expresión que encaje, de la más concreta a la más vaga.
+    let d = null;
+    if ((m = s.match(new RegExp(`\\bantes del? (?:dia )?(\\d{1,2})(?: de (${MES}))?\\b`)))) {
+      const x = dayDate(today, +m[1], m[2] ? MONTHS.indexOf(m[2]) : null);
+      d = x && addDays(x, -1);   // «antes del 20»: el último día que vale es el 19
+    }
+    else if (/\bpasado manana\b/.test(s)) d = addDays(today, 2);
+    else if (/\bhoy\b/.test(s)) d = today;
+    else if (/(?<!\b(?:la|esta) )\bmanana\b/.test(s)) d = addDays(today, 1);   // no «por la mañana»
+    else if ((m = s.match(new RegExp(`\\b(${WDRE})\\b(?: (?:dia )?(\\d{1,2})\\b(?: de (${MES}))?)?`)))) {
+      const wd = WD.indexOf(m[1]);
+      if (m[2]) {
+        const x = dayDate(today, +m[2], m[3] ? MONTHS.indexOf(m[3]) : null);
+        if (x && x.getDay() === wd) d = x;
+        else if (x) out.warn = `«${WEEKDAYS[wd]} ${m[2]}» no cuadra: el ${m[2]} es ${WEEKDAYS[x.getDay()]}.`;
+      } else if (NEXT_WEEK.test(s)) d = addDays(nextWd(today, 1), (wd + 6) % 7);   // «el viernes de la semana que viene»
+      else d = nextWd(today, wd);
+    }
+    else if ((m = s.match(new RegExp(`\\b(\\d{1,2}) de (${MES})(?: de (\\d{4}))?\\b`)))) d = dayDate(today, +m[1], MONTHS.indexOf(m[2]), m[3] ? +m[3] : null);
+    else if ((m = s.match(/\b(?:el|del) (?:dia )?(\d{1,2})\b(?![:.,]?\d| ?h\b| ?%| (?:horas|minutos|por ciento))/))) d = dayDate(today, +m[1]);
+    else if ((m = s.match(/\b(?:dentro de|en) (\d+) (dias?|semanas?|mes|meses)\b/))) {
+      if (m[2].startsWith('mes')) { d = new Date(today); d.setMonth(d.getMonth() + +m[1]); }
+      else d = addDays(today, +m[1] * (m[2].startsWith('semana') ? 7 : 1));
+    }
+    else if (/\b(?:fin|final) del? mes\b/.test(s)) d = lastOfMonth(today);
+    else if (NEXT_WEEK.test(s)) d = nextWd(today, 1);
+
+    // Un recordatorio que se repite sin fecha empieza la primera vez que toca
+    if (out.rep && !d) {
+      const r = parseRule(out.rep, today);
+      for (let i = 0, x = today; r && i < 400; i++, x = addDays(x, 1)) if (r.test(x)) { d = x; break; }
+    }
+    if (['idea', 'nota'].includes(out.tipo)) { d = null; out.urgent = false; }
+    if (out.tipo === 'recordatorio') out.urgent = false;
+    out.due = d ? toIso(d) : null;
+    return out;
+  }
+
   // ---------- etiquetas ----------
   function knownTags() {
     let extra = [];
@@ -718,7 +830,38 @@
 
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
+  // ---------- relleno automático de tipo, fecha y repetición ----------
+  // Lo que m. toca a mano no se vuelve a rellenar solo hasta la próxima anotación.
+  let manual = {};
+  let fillTimer = null;
+  const dayLabel = (iso) => { const d = toDate(iso); return `${WEEKDAYS[d.getDay()].slice(0, 3)} ${d.getDate()} ${MONTHS[d.getMonth()].slice(0, 3)}`; };
+
+  function autoFill() {
+    clearTimeout(fillTimer);
+    const text = $('#txt').value.trim();
+    const g = text ? interpret(text, madridNow().slice(0, 10)) : {};
+    if (!manual.type) { selType = g.tipo || null; renderTypes(); }
+    if (!manual.due) $('#due').value = g.due || '';
+    if (!manual.rep) $('#rep').value = g.rep || '';
+    if (!manual.urgent) $('#chk-urgent').checked = !!g.urgent;
+    // Se cuenta solo lo que la app ha puesto y se va a enviar
+    const shown = (id) => !$(id).classList.contains('hidden');
+    const parts = [];
+    if (g.tipo && !manual.type) parts.push(`${TYPES[g.tipo]} ${g.tipo}`);
+    if (g.due && !manual.due && shown('#lbl-due')) parts.push(`⏳ ${dayLabel(g.due)}`);
+    if (g.rep && !manual.rep && shown('#rep')) parts.push(`🔁 ${g.rep}`);
+    if (g.urgent && !manual.urgent && shown('#lbl-urgent')) parts.push('🔴 urgente');
+    $('#hint').textContent = g.warn && !manual.due ? `⚠️ ${g.warn} Pon la fecha a mano.`
+      : parts.length ? `Entendido: ${parts.join(' · ')}` : '';
+  }
+
+  $('#txt').addEventListener('input', () => { clearTimeout(fillTimer); fillTimer = setTimeout(autoFill, 400); });
+  $('#due').addEventListener('input', () => { manual.due = true; autoFill(); });
+  $('#rep').addEventListener('input', () => { manual.rep = true; });
+  $('#chk-urgent').addEventListener('change', () => { manual.urgent = true; autoFill(); });
+
   $('#btn-add').addEventListener('click', async () => {
+    autoFill();
     const raw = $('#txt').value.trim();
     if (!raw) return;
     // Solo se mandan los campos que el tipo elegido lleva (los controles ocultos no cuentan).
@@ -736,6 +879,8 @@
       $('#due').value = '';
       $('#rep').value = '';
       selType = null;
+      manual = {};
+      $('#hint').textContent = '';
       renderTypes();
       persist(DRAFT_KEY, null);
     }
@@ -757,7 +902,8 @@
     const b = e.target.closest('button[data-type]');
     if (!b) return;
     selType = b.dataset.type || null;
-    renderTypes();
+    manual.type = !!selType;   // «tipo automático» devuelve el tipo a la app
+    if (selType) renderTypes(); else autoFill();
   });
 
   // ---------- dictado por voz (Chrome y Edge) ----------
@@ -827,11 +973,12 @@
       const m = last && last.isFinal ? text.match(TRIGGER) : null;
       if (m) {
         text = text.slice(0, m.index).trim();
-        if (m[1]) $('#chk-urgent').checked = true;
+        if (m[1]) { $('#chk-urgent').checked = true; manual.urgent = true; }
         autoSubmit = !!(base + text).trim();
         rec.stop();
       }
       $('#txt').value = base + text;
+      if (!autoSubmit) autoFill();   // al anotar, el botón ya lo rellena
     };
     rec.onerror = (ev) => {
       if (ev.error === 'no-speech' || ev.error === 'aborted') return; // silencio: lo gestiona onend
@@ -931,6 +1078,7 @@
     $('#txt').value = draft;
     selTag = store.get(TAG_KEY) || null;
     renderTypes();
+    autoFill();
     renderTags();
     resync();
   }
