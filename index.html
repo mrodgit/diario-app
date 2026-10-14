@@ -80,6 +80,10 @@
   #btn-mic.rec { background: var(--danger); border-color: var(--danger); color: #fff; animation: pulse 1.2s infinite; }
   @keyframes pulse { 50% { opacity: .6; } }
   @media (prefers-reduced-motion: reduce) { #btn-mic.rec { animation: none; } }
+  .ideas > summary { list-style: none; cursor: pointer; }
+  .ideas > summary::-webkit-details-marker { display: none; }
+  .ideas > summary h2::before { content: '▸ '; }
+  .ideas[open] > summary h2::before { content: '▾ '; }
   .hidden { display: none !important; }
   .help { font-size: 14px; color: var(--muted); }
   .help a { color: var(--accent); }
@@ -122,10 +126,12 @@
   <section id="view-app" class="hidden">
     <div class="card">
       <div id="tags" class="chips"></div>
+      <div id="types" class="chips"></div>
       <textarea id="txt" placeholder="Escribe o dicta con el micrófono del teclado…"></textarea>
+      <input id="rep" class="hidden" placeholder="🔁 Repetición (opcional): cada lunes, días 1 y 15 hasta fin de año…" autocomplete="off" style="margin-top:8px">
       <div class="row">
-        <label class="toggle"><input type="checkbox" id="chk-urgent"> 🔴 Urgente</label>
-        <label class="toggle" title="Fecha límite (opcional)">⏳ <input type="date" id="due"></label>
+        <label class="toggle" id="lbl-urgent"><input type="checkbox" id="chk-urgent"> 🔴 Urgente</label>
+        <label class="toggle" id="lbl-due" title="Fecha límite (opcional)">⏳ <input type="date" id="due"></label>
         <span class="grow"></span>
         <button class="hidden" id="btn-mic" title="Dictar">🎤</button>
         <button class="primary" id="btn-add">Anotar</button>
@@ -140,6 +146,14 @@
     <div id="filter" class="chips"></div>
     <div id="open" class="list"></div>
 
+    <h2>Recordatorios</h2>
+    <div id="reminders" class="list"></div>
+
+    <details id="ideas-box" class="ideas">
+      <summary><h2>Banco de ideas <span id="ideas-count"></span></h2></summary>
+      <div id="ideas" class="list"></div>
+    </details>
+
     <div class="row" style="margin-top:28px">
       <button class="link" id="btn-reset">Olvidar este dispositivo</button>
       <span class="grow"></span>
@@ -150,13 +164,17 @@
 
 <script>
 (() => {
-  const VERSION = '2026-10-14 15:21';   // cámbiala en cada cambio publicado
+  const VERSION = '2026-10-14 18:41';   // cámbiala en cada cambio publicado
   const CFG_KEY = 'diario-cfg';
   const DRAFT_KEY = 'diario-borrador';
   const INBOX = 'entrada.md';
   const DIARY = 'diario.md';
-  const TYPES = { 'tarea': '📌', 'llamada': '📞', 'reunión': '👥', 'correo': '✉️', 'idea': '💡', 'nota': '📝' };
-  const STATES = { 'abierta': '⚪', 'en curso': '🟡', 'en espera': '⏸️', 'cerrada': '✅' };
+  const TYPES = { 'tarea': '📌', 'reunión': '👥', 'recordatorio': '🔔', 'idea': '💡', 'nota': '📝' };
+  const OLD_TYPES = { 'llamada': 'tarea', 'correo': 'tarea' };   // tipos retirados, se leen como tarea
+  const STATES = { 'abierta': '⚪', 'en curso': '🟡', 'en espera': '⏸️', 'cerrada': '✅',
+    'viva': '🌱', 'convertida': '➡️', 'descartada': '🗑️' };
+  const HAS_PRIO = ['tarea', 'reunión'];
+  const WEEKDAYS = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
   const DUE_SOON_DAYS = 2;
   const PRIOS = ['alta', 'media', 'baja'];
   const PRIO_ICON = { alta: '🔴', media: '🟠', baja: '🟢' };
@@ -170,6 +188,7 @@
   let token = null;
   let entries = [];
   let selTag = null;     // etiqueta elegida para la próxima anotación
+  let selType = null;    // tipo elegido para la próxima anotación (null = lo deduce Claude)
   let filterTag = null;  // etiqueta por la que se filtran las abiertas
 
   // ---------- almacenamiento local ----------
@@ -277,22 +296,24 @@
     const entries = [];
     let cur = null;
     for (const line of text.split('\n')) {
-      // Cabecera: ### #NNN · fecha · tipo · estado · prioridad · ⏳ límite · [etiquetas]
+      // Cabecera: ### #NNN · fecha · tipo · estado · prioridad · ⏳ fecha · 🔁 repetición · [etiquetas]
       // Cada campo se reconoce por su contenido, así que los opcionales pueden faltar.
       const m = line.match(/^### #(\d+) · (.+)$/);
       if (m) {
         const [fecha, ...fields] = m[2].split(' · ').map((f) => f.trim());
-        cur = { num: m[1], fecha, tipo: null, estado: null, prio: null, due: null, tags: [], body: [] };
+        cur = { num: m[1], fecha, tipo: null, estado: null, prio: null, due: null, rep: null, tags: [], body: [] };
+        const typeKeys = [...Object.keys(TYPES), ...Object.keys(OLD_TYPES)];
         for (const f of fields) {
           if (f.startsWith('[')) cur.tags.push(...[...f.matchAll(/\[([\w-]+)\]/g)].map((x) => x[1]));
           else if (f.includes('⏳')) cur.due = (f.match(/\d{4}-\d{2}-\d{2}/) || [])[0] || null;
-          else if (!cur.tipo && Object.keys(TYPES).some((k) => f.includes(k))) cur.tipo = Object.keys(TYPES).find((k) => f.includes(k));
+          else if (f.includes('🔁')) cur.rep = f.replace('🔁', '').trim();
+          else if (!cur.tipo && typeKeys.some((k) => f.includes(k))) cur.tipo = typeKeys.find((k) => f.includes(k));
           else if (!cur.estado && Object.keys(STATES).some((k) => f.includes(k))) cur.estado = Object.keys(STATES).find((k) => f.includes(k));
           else if (!cur.prio && PRIOS.some((k) => f.includes(k))) cur.prio = PRIOS.find((k) => f.includes(k));
         }
-        cur.tipo = cur.tipo || 'tarea';
-        cur.estado = cur.estado || 'abierta';
-        cur.prio = cur.prio || 'media';
+        cur.tipo = OLD_TYPES[cur.tipo] || cur.tipo || 'tarea';
+        cur.estado = cur.estado || (cur.tipo === 'idea' ? 'viva' : 'abierta');
+        cur.prio = HAS_PRIO.includes(cur.tipo) ? (cur.prio || 'media') : null;
         entries.push(cur);
       } else if (cur && !/^#{1,2} /.test(line)) {
         cur.body.push(line);
@@ -311,6 +332,46 @@
     return Math.floor((Date.now() - d.getTime()) / 86400000);
   }
 
+  // ---------- recordatorios: próxima vez que saltan ----------
+  const toDate = (iso) => new Date(iso + 'T12:00:00');
+  const toIso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+  // Convierte la regla («días 1, 15 hasta 2026-12-31», «cada lunes y jueves», «cada mes»…)
+  // en una función que dice si un día toca. Devuelve null si la regla no se entiende.
+  function parseRule(rep, start) {
+    const until = (rep.match(/hasta (\d{4}-\d{2}-\d{2})/) || [])[1] || null;
+    const rule = rep.replace(/hasta \d{4}-\d{2}-\d{2}/, '').trim().toLowerCase();
+    let test = null;
+    if (rule === 'cada día') test = () => true;
+    else if (rule === 'cada semana') test = (d) => d.getDay() === start.getDay();
+    else if (rule === 'cada mes') test = (d) => d.getDate() === start.getDate();
+    else if (/^días /.test(rule)) {
+      const days = (rule.match(/\d+/g) || []).map(Number);
+      if (days.length) test = (d) => days.includes(d.getDate());
+    } else if (/^cada /.test(rule)) {
+      const days = WEEKDAYS.map((w, i) => (rule.includes(w) ? i : -1)).filter((i) => i >= 0);
+      if (days.length) test = (d) => days.includes(d.getDay());
+    }
+    return test ? { test, until } : null;
+  }
+
+  // Fecha (AAAA-MM-DD) que importa de cada anotación: el plazo, o la próxima vez que salta
+  // un recordatorio. Si la repetición ya terminó, devuelve su fecha final (sale como vencida).
+  function whenOf(e) {
+    if (e.tipo !== 'recordatorio' || !e.rep || !e.due) return e.due;
+    const start = toDate(e.due);
+    const rule = parseRule(e.rep, start);
+    if (!rule) return e.due;
+    const today = toDate(madridNow().slice(0, 10));
+    const d = new Date(Math.max(today, start));
+    for (let i = 0; i < 400; i++, d.setDate(d.getDate() + 1)) {
+      const iso = toIso(d);
+      if (rule.until && iso > rule.until) return rule.until;
+      if (rule.test(d)) return iso;
+    }
+    return e.due;
+  }
+
   // ---------- etiquetas ----------
   function knownTags() {
     let extra = [];
@@ -327,7 +388,7 @@
     const tags = knownTags();
     if (selTag && !tags.includes(selTag)) tags.push(selTag);
     $('#tags').innerHTML = chipsHtml(tags, selTag, 'sin etiqueta') + '<button class="chip" data-new="1">＋ nueva</button>';
-    const used = [...new Set(entries.filter(isOpen).flatMap((e) => e.tags))].sort();
+    const used = [...new Set(entries.filter(isVisible).flatMap((e) => e.tags))].sort();
     $('#filter').innerHTML = used.length > 1 ? chipsHtml(used, filterTag, 'todas') : '';
   }
 
@@ -357,45 +418,69 @@
     renderOpen();
   });
 
-  const isOpen = (e) => e.tipo !== 'nota' && e.estado !== 'cerrada';
-  const dueIn = (e) => (e.due ? -daysSince(e.due) : Infinity);   // días que faltan (negativo = vencida)
+  const isOpen = (e) => HAS_PRIO.includes(e.tipo) && e.estado !== 'cerrada';
+  const isReminder = (e) => e.tipo === 'recordatorio' && e.estado !== 'cerrada';
+  const isIdea = (e) => e.tipo === 'idea' && e.estado === 'viva';
+  const isVisible = (e) => isOpen(e) || isReminder(e) || isIdea(e);
+  const byTag = (e) => !filterTag || e.tags.includes(filterTag);
+  const dueIn = (e) => { const w = whenOf(e); return w ? -daysSince(w) : Infinity; };   // días que faltan (negativo = vencida)
   const isDueSoon = (e) => dueIn(e) <= DUE_SOON_DAYS;
 
   function dueLabel(e) {
-    if (!e.due) return '';
+    const w = whenOf(e);
+    if (!w) return '';
     const d = dueIn(e);
-    const when = d < 0 ? `vencida (${e.due})` : d === 0 ? 'hoy' : d === 1 ? 'mañana' : e.due;
+    const when = d < 0 ? `vencida (${w})` : d === 0 ? 'hoy' : d === 1 ? 'mañana' : w;
     const cls = d < 0 ? 'overdue' : d <= DUE_SOON_DAYS ? 'stale' : '';
-    return ` · <span class="${cls}">⏳ ${esc(when)}</span>`;
+    const icon = e.tipo === 'recordatorio' ? '🔔' : e.tipo === 'reunión' ? '👥' : '⏳';
+    return ` · <span class="${cls}">${icon} ${esc(when)}</span>`;
+  }
+
+  // Botón que deja una línea en la bandeja para que Claude aplique el cambio.
+  const btn = (num, say, label) => `<button class="small" data-num="${num}" data-say="${esc(say)}">${label}</button>`;
+
+  function actionsOf(e) {
+    if (e.tipo === 'idea') return btn(e.num, `la idea #${e.num} se convierte en tarea`, '➡️ Pasar a tarea')
+      + btn(e.num, `la idea #${e.num} pasa a descartada`, '🗑️ Descartar');
+    if (e.tipo === 'recordatorio') return e.rep
+      ? btn(e.num, `la #${e.num}: hecho el recordatorio del ${whenOf(e)}`, '✔️ Hecho esta vez')
+        + btn(e.num, `la #${e.num} pasa a cerrada`, '✅ Cerrar del todo')
+      : btn(e.num, `la #${e.num} pasa a cerrada`, '✅ Hecho');
+    return (e.estado !== 'en curso' ? btn(e.num, `la #${e.num} pasa a en curso`, '🟡 En curso') : '')
+      + (e.estado !== 'en espera' ? btn(e.num, `la #${e.num} pasa a en espera`, '⏸️ En espera') : '')
+      + btn(e.num, `la #${e.num} pasa a cerrada`, '✅ Cerrar');
+  }
+
+  function itemHtml(e) {
+    const first = (e.body.find((l) => l.trim()) || '').trim();
+    const stale = isOpen(e) && daysSince(e.lastMove) > STALE_DAYS;
+    const tags = e.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join(' ');
+    const meta = [`#${e.num}`, esc(e.fecha), `${TYPES[e.tipo]} ${esc(e.tipo)}`, `${STATES[e.estado]} ${esc(e.estado)}`];
+    if (e.prio) meta.push(`${PRIO_ICON[e.prio]} ${e.prio}`);
+    return `<details class="item">
+      <summary>
+        <div class="meta">${meta.join(' · ')}${dueLabel(e)}${e.rep ? ` · 🔁 ${esc(e.rep)}` : ''}${tags ? ' · ' + tags : ''}${stale ? ' · <span class="stale">sin movimiento</span>' : ''}</div>
+        <div>${esc(first)}</div>
+      </summary>
+      <div class="body">${esc(e.body.slice(1).join('\n').trim())}</div>
+      <div class="actions">${actionsOf(e)}</div>
+    </details>`;
   }
 
   function renderOpen() {
-    const open = entries
-      .filter(isOpen)
-      .filter((e) => !filterTag || e.tags.includes(filterTag))
+    const open = entries.filter(isOpen).filter(byTag)
       .sort((a, b) => (isDueSoon(b) - isDueSoon(a))
         || (isDueSoon(a) && isDueSoon(b) ? dueIn(a) - dueIn(b) : 0)
         || PRIOS.indexOf(a.prio) - PRIOS.indexOf(b.prio)
         || a.fecha.localeCompare(b.fecha));
-    const box = $('#open');
-    if (!open.length) { box.innerHTML = '<p class="empty">Nada abierto.</p>'; return; }
-    box.innerHTML = open.map((e) => {
-      const first = (e.body.find((l) => l.trim()) || '').trim();
-      const stale = daysSince(e.lastMove) > STALE_DAYS;
-      const tags = e.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join(' ');
-      return `<details class="item">
-        <summary>
-          <div class="meta">#${e.num} · ${esc(e.fecha)} · ${TYPES[e.tipo]} ${esc(e.tipo)} · ${STATES[e.estado]} ${esc(e.estado)} · ${PRIO_ICON[e.prio]} ${e.prio}${dueLabel(e)}${tags ? ' · ' + tags : ''}${stale ? ' · <span class="stale">sin movimiento</span>' : ''}</div>
-          <div>${esc(first)}</div>
-        </summary>
-        <div class="body">${esc(e.body.slice(1).join('\n').trim())}</div>
-        <div class="actions">
-          ${e.estado !== 'en curso' ? `<button class="small" data-num="${e.num}" data-to="en curso">🟡 En curso</button>` : ''}
-          ${e.estado !== 'en espera' ? `<button class="small" data-num="${e.num}" data-to="en espera">⏸️ En espera</button>` : ''}
-          <button class="small" data-num="${e.num}" data-to="cerrada">✅ Cerrar</button>
-        </div>
-      </details>`;
-    }).join('');
+    $('#open').innerHTML = open.length ? open.map(itemHtml).join('') : '<p class="empty">Nada abierto.</p>';
+
+    const rems = entries.filter(isReminder).filter(byTag).sort((a, b) => dueIn(a) - dueIn(b));
+    $('#reminders').innerHTML = rems.length ? rems.map(itemHtml).join('') : '<p class="empty">Ningún recordatorio.</p>';
+
+    const ideas = entries.filter(isIdea).filter(byTag).sort((a, b) => a.fecha.localeCompare(b.fecha));
+    $('#ideas-count').textContent = ideas.length ? `(${ideas.length})` : '';
+    $('#ideas').innerHTML = ideas.length ? ideas.map(itemHtml).join('') : '<p class="empty">Ninguna idea guardada.</p>';
   }
 
   let inboxLines = [];
@@ -469,7 +554,7 @@
     try {
       const [inbox, diary] = await Promise.all([getFile(INBOX), getFile(DIARY)]);
       entries = parseDiary(diary.text);
-      if (filterTag && !entries.some((e) => isOpen(e) && e.tags.includes(filterTag))) filterTag = null;
+      if (filterTag && !entries.some((e) => isVisible(e) && e.tags.includes(filterTag))) filterTag = null;
       renderInbox(inbox.text);
       renderTags();
       renderOpen();
@@ -501,15 +586,43 @@
   $('#btn-add').addEventListener('click', async () => {
     const raw = $('#txt').value.trim();
     if (!raw) return;
-    const due = $('#due').value;
+    // Solo se mandan los campos que el tipo elegido lleva (los controles ocultos no cuentan).
+    const shown = (id) => !$(id).classList.contains('hidden');
+    const due = shown('#lbl-due') ? $('#due').value : '';
+    const rep = shown('#rep') ? $('#rep').value.trim() : '';
+    if (selType === 'recordatorio' && !due) { msg($('#add-msg'), 'Un recordatorio necesita fecha: elige cuándo salta.', 'err'); return; }
     const text = (selTag ? `[${selTag}] ` : '') + raw.replace(/\s*\n+\s*/g, ' / ')
-      + ($('#chk-urgent').checked ? ' · 🔴 urgente' : '') + (due ? ` · ⏳ ${due}` : '');
+      + (selType ? ` · ${TYPES[selType]} ${selType}` : '')
+      + (shown('#lbl-urgent') && $('#chk-urgent').checked ? ' · 🔴 urgente' : '')
+      + (due ? ` · ⏳ ${due}` : '') + (rep ? ` · 🔁 ${rep}` : '');
     if (await add(text)) {
       $('#txt').value = '';
       $('#chk-urgent').checked = false;
       $('#due').value = '';
+      $('#rep').value = '';
+      selType = null;
+      renderTypes();
       store.del(DRAFT_KEY);
     }
+  });
+
+  // ---------- tipo de la próxima anotación ----------
+  function renderTypes() {
+    $('#types').innerHTML = `<button class="chip${selType ? '' : ' on'}" data-type="">tipo automático</button>`
+      + Object.entries(TYPES).map(([t, i]) => `<button class="chip${t === selType ? ' on' : ''}" data-type="${t}">${i} ${t}</button>`).join('');
+    // Cada tipo enseña solo los campos que lleva.
+    const t = selType;
+    $('#lbl-urgent').classList.toggle('hidden', ['recordatorio', 'idea', 'nota'].includes(t));
+    $('#lbl-due').classList.toggle('hidden', ['idea', 'nota'].includes(t));
+    $('#lbl-due').title = t === 'recordatorio' ? 'Cuándo salta' : t === 'reunión' ? 'Día de la reunión' : 'Fecha límite (opcional)';
+    $('#rep').classList.toggle('hidden', t !== 'recordatorio');
+  }
+
+  $('#types').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-type]');
+    if (!b) return;
+    selType = b.dataset.type || null;
+    renderTypes();
   });
 
   // ---------- dictado por voz (Chrome y Edge) ----------
@@ -599,12 +712,14 @@
   $('#txt').addEventListener('input', () => store.set(DRAFT_KEY, $('#txt').value));
   $('#txt').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('#btn-add').click(); });
 
-  $('#open').addEventListener('click', async (e) => {
-    const b = e.target.closest('button[data-num]');
-    if (!b) return;
-    b.disabled = true;
-    await add(`la #${b.dataset.num} pasa a ${b.dataset.to}`);
-  });
+  for (const id of ['#open', '#reminders', '#ideas']) {
+    $(id).addEventListener('click', async (e) => {
+      const b = e.target.closest('button[data-say]');
+      if (!b) return;
+      b.disabled = true;
+      await add(b.dataset.say);
+    });
+  }
 
   $('#btn-refresh').addEventListener('click', refresh);
 
@@ -654,6 +769,7 @@
     show('app');
     $('#txt').value = store.get(DRAFT_KEY) || '';
     selTag = store.get(TAG_KEY) || null;
+    renderTypes();
     renderTags();
     refresh();
   }
