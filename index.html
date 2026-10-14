@@ -63,8 +63,12 @@
   .row { flex-wrap: wrap; }
   .body { white-space: pre-wrap; font-size: 15px; margin-top: 6px; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
-  .inbox li { font-size: 14px; margin: 4px 0; }
-  .inbox { padding-left: 18px; margin: 0; }
+  .inbox { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+  .inbox li { font-size: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+  .inbox .line { display: flex; gap: 6px; align-items: flex-start; }
+  .inbox .line > span { flex: 1; overflow-wrap: anywhere; }
+  .inbox .icon { padding: 2px 6px; font-size: 14px; border: 0; background: none; }
+  .inbox textarea { min-height: 70px; font-size: 15px; margin-top: 6px; }
   .empty { color: var(--muted); font-size: 14px; }
   .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; }
   .chip {
@@ -138,12 +142,15 @@
 
     <div class="row" style="margin-top:28px">
       <button class="link" id="btn-reset">Olvidar este dispositivo</button>
+      <span class="grow"></span>
+      <span class="meta" id="version"></span>
     </div>
   </section>
 </main>
 
 <script>
 (() => {
+  const VERSION = '2026-10-14 15:21';   // cámbiala en cada cambio publicado
   const CFG_KEY = 'diario-cfg';
   const DRAFT_KEY = 'diario-borrador';
   const INBOX = 'entrada.md';
@@ -158,6 +165,7 @@
   const EXTRA_TAGS_KEY = 'diario-etiquetas-nuevas';
 
   const $ = (s) => document.querySelector(s);
+  $('#version').textContent = 'versión ' + VERSION;
   let cfg = null;
   let token = null;
   let entries = [];
@@ -242,6 +250,22 @@
       const { text, sha } = await getFile(INBOX);
       const base = text === '' ? '# Bandeja de entrada\n\n' : (text.endsWith('\n') ? text : text + '\n');
       const res = await putFile(INBOX, base + line + '\n', sha, 'entrada: nueva línea desde la app');
+      if (res.ok) return;
+      if (res.status !== 409 && res.status !== 422) throw new Error(`GitHub respondió ${res.status} al guardar`);
+    }
+    throw new Error('No se pudo guardar: el archivo cambió varias veces seguidas. Prueba otra vez.');
+  }
+
+  // Cambia una línea concreta de la bandeja (newLine = null la borra). Lee siempre la versión
+  // más reciente: si la línea ya no está (Claude la procesó), avisa y no toca nada.
+  async function changeInboxLine(oldLine, newLine, message) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { text, sha } = await getFile(INBOX);
+      const lines = text.split('\n');
+      const i = lines.indexOf(oldLine);
+      if (i < 0) throw new Error('Esa línea ya no está en la bandeja: quizá Claude la ha procesado. Recarga.');
+      if (newLine === null) lines.splice(i, 1); else lines[i] = newLine;
+      const res = await putFile(INBOX, lines.join('\n'), sha, message);
       if (res.ok) return;
       if (res.status !== 409 && res.status !== 422) throw new Error(`GitHub respondió ${res.status} al guardar`);
     }
@@ -361,7 +385,7 @@
       const tags = e.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join(' ');
       return `<details class="item">
         <summary>
-          <div class="meta">#${e.num} · ${TYPES[e.tipo]} ${esc(e.tipo)} · ${PRIO_ICON[e.prio]} ${e.prio} · ${STATES[e.estado]} ${esc(e.estado)}${dueLabel(e)}${tags ? ' · ' + tags : ''}${stale ? ' · <span class="stale">sin movimiento</span>' : ''}</div>
+          <div class="meta">#${e.num} · ${esc(e.fecha)} · ${TYPES[e.tipo]} ${esc(e.tipo)} · ${STATES[e.estado]} ${esc(e.estado)} · ${PRIO_ICON[e.prio]} ${e.prio}${dueLabel(e)}${tags ? ' · ' + tags : ''}${stale ? ' · <span class="stale">sin movimiento</span>' : ''}</div>
           <div>${esc(first)}</div>
         </summary>
         <div class="body">${esc(e.body.slice(1).join('\n').trim())}</div>
@@ -374,13 +398,71 @@
     }).join('');
   }
 
+  let inboxLines = [];
+  // «- 2026-10-14 14:29 · texto»: la fecha y hora se conservan, solo se edita el texto
+  function splitLine(l) {
+    const m = l.match(/^- (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) · (.*)$/);
+    return m ? { when: m[1], text: m[2] } : { when: null, text: l.slice(2) };
+  }
+
   function renderInbox(text) {
-    const lines = text.split('\n').filter((l) => l.startsWith('- '));
-    $('#inbox-count').textContent = lines.length ? `(${lines.length})` : '';
-    $('#inbox').innerHTML = lines.length
-      ? `<ul class="inbox">${lines.map((l) => `<li>${esc(l.slice(2))}</li>`).join('')}</ul>`
+    inboxLines = text.split('\n').filter((l) => l.startsWith('- '));
+    drawInbox();
+  }
+
+  function drawInbox() {
+    $('#inbox-count').textContent = inboxLines.length ? `(${inboxLines.length})` : '';
+    $('#inbox').innerHTML = inboxLines.length
+      ? `<ul class="inbox">${inboxLines.map((l, i) => `<li data-i="${i}">
+          <div class="line"><span>${esc(l.slice(2))}</span>
+            <button class="icon" data-act="edit" title="Editar">✏️</button>
+            <button class="icon" data-act="del" title="Borrar">🗑️</button></div>
+        </li>`).join('')}</ul>`
       : '<p class="empty">Vacía. Claude procesa la bandeja al abrir sesión.</p>';
   }
+
+  $('#inbox').addEventListener('click', async (e) => {
+    const b = e.target.closest('button[data-act]');
+    if (!b) return;
+    const li = b.closest('li');
+    const line = inboxLines[li.dataset.i];
+    const { when, text } = splitLine(line);
+    const act = b.dataset.act;
+
+    if (act === 'edit') {
+      li.innerHTML = `<div class="meta">${esc(when || '')}</div>
+        <textarea>${esc(text)}</textarea>
+        <div class="actions"><button class="small primary" data-act="save">Guardar</button>
+          <button class="small" data-act="cancel">Cancelar</button></div>`;
+      const ta = li.querySelector('textarea');
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      return;
+    }
+    if (act === 'cancel') { drawInbox(); return; }
+
+    let newLine = null;
+    let message = 'entrada: línea borrada desde la app';
+    if (act === 'save') {
+      const t = li.querySelector('textarea').value.trim().replace(/\s*\n+\s*/g, ' / ');
+      if (!t || t === text) { drawInbox(); return; }
+      newLine = `- ${when ? when + ' · ' : ''}${t}`;
+      message = 'entrada: línea editada desde la app';
+    } else if (!confirm(`¿Borrar esta línea de la bandeja?\n\n${text}`)) {
+      return;
+    }
+
+    li.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+    msg($('#add-msg'), 'Guardando…');
+    try {
+      await changeInboxLine(line, newLine, message);
+      await refresh();
+      msg($('#add-msg'), newLine === null ? 'Borrada ✓' : 'Editada ✓', 'ok');
+    } catch (err) {
+      msg($('#add-msg'), err.message, 'err');
+      li.querySelectorAll('button').forEach((x) => { x.disabled = false; });
+    }
+  });
 
   async function refresh() {
     msg($('#add-msg'), 'Cargando…');
