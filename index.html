@@ -84,6 +84,9 @@
   .ideas > summary::-webkit-details-marker { display: none; }
   .ideas > summary h2::before { content: '▸ '; }
   .ideas[open] > summary h2::before { content: '▾ '; }
+  .banner { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    margin-top: 10px; padding: 10px 12px; border-radius: 10px; font-size: 14px;
+    background: var(--card); border: 1px solid var(--accent); }
   .hidden { display: none !important; }
   .help { font-size: 14px; color: var(--muted); }
   .help a { color: var(--accent); }
@@ -91,6 +94,10 @@
 </head>
 <body>
 <main>
+  <div id="update" class="banner hidden">
+    <span>Hay una versión nueva de la app.</span>
+    <button class="small primary" id="btn-update">Actualizar</button>
+  </div>
   <header>
     <h1>Diario</h1>
     <button class="link hidden" id="btn-refresh" title="Recargar">↻ Recargar</button>
@@ -139,6 +146,12 @@
       <div class="msg" id="add-msg"></div>
     </div>
 
+    <div id="queue-box" class="hidden">
+      <h2>Pendientes de enviar <span id="queue-count"></span></h2>
+      <p class="help">Escritas sin conexión. Se envían solas en cuanto vuelva la red.</p>
+      <ul id="queue" class="inbox"></ul>
+    </div>
+
     <h2>En la bandeja <span id="inbox-count"></span></h2>
     <div id="inbox"></div>
 
@@ -164,7 +177,7 @@
 
 <script>
 (() => {
-  const VERSION = '2026-10-14 18:41';   // cámbiala en cada cambio publicado
+  const VERSION = '2026-10-14 22:48';   // cámbiala en cada cambio publicado
   const CFG_KEY = 'diario-cfg';
   const DRAFT_KEY = 'diario-borrador';
   const INBOX = 'entrada.md';
@@ -181,6 +194,8 @@
   const STALE_DAYS = 14;
   const TAG_KEY = 'diario-etiqueta';
   const EXTRA_TAGS_KEY = 'diario-etiquetas-nuevas';
+  const QUEUE_KEY = 'diario-pendientes';   // líneas escritas sin conexión, aún sin enviar
+  const COPY_KEY = 'diario-copia';         // última copia del diario y la bandeja, para leer sin red
 
   const $ = (s) => document.querySelector(s);
   $('#version').textContent = 'versión ' + VERSION;
@@ -189,6 +204,7 @@
   let entries = [];
   let selTag = null;     // etiqueta elegida para la próxima anotación
   let selType = null;    // tipo elegido para la próxima anotación (null = lo deduce Claude)
+  let offline = false;   // la última carga falló por falta de red
   let filterTag = null;  // etiqueta por la que se filtran las abiertas
 
   // ---------- almacenamiento local ----------
@@ -241,12 +257,20 @@
   }
 
   // ---------- GitHub ----------
-  function gh(path, opts = {}) {
-    return fetch(`https://api.github.com/repos/${cfg.repo}${path}`, {
-      cache: 'no-store',
-      ...opts,
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', ...(opts.headers || {}) },
-    });
+  // Sin red, fetch falla con TypeError: se marca para distinguirlo de un error de GitHub.
+  const offlineError = () => Object.assign(new Error('Sin conexión.'), { offline: true });
+
+  async function gh(path, opts = {}) {
+    if (navigator.onLine === false) throw offlineError();
+    try {
+      return await fetch(`https://api.github.com/repos/${cfg.repo}${path}`, {
+        cache: 'no-store',
+        ...opts,
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', ...(opts.headers || {}) },
+      });
+    } catch {
+      throw offlineError();
+    }
   }
 
   async function getFile(name) {
@@ -263,16 +287,61 @@
     return gh(`/contents/${name}`, { method: 'PUT', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
   }
 
-  // Añade una línea al final de la bandeja. Si otro dispositivo escribió a la vez, reintenta.
-  async function appendToInbox(line) {
+  // Añade líneas al final de la bandeja en un solo commit. Se salta las que ya estén
+  // (un envío anterior pudo llegar aunque el móvil perdiera la respuesta).
+  // Si otro dispositivo escribió a la vez, reintenta.
+  async function appendToInbox(lines) {
     for (let attempt = 0; attempt < 3; attempt++) {
       const { text, sha } = await getFile(INBOX);
+      const existing = new Set(text.split('\n'));
+      const fresh = lines.filter((l) => !existing.has(l));
+      if (!fresh.length) return;
       const base = text === '' ? '# Bandeja de entrada\n\n' : (text.endsWith('\n') ? text : text + '\n');
-      const res = await putFile(INBOX, base + line + '\n', sha, 'entrada: nueva línea desde la app');
+      const message = fresh.length === 1 ? 'entrada: nueva línea desde la app' : `entrada: ${fresh.length} líneas desde la app`;
+      const res = await putFile(INBOX, base + fresh.join('\n') + '\n', sha, message);
       if (res.ok) return;
       if (res.status !== 409 && res.status !== 422) throw new Error(`GitHub respondió ${res.status} al guardar`);
     }
     throw new Error('No se pudo guardar: el archivo cambió varias veces seguidas. Prueba otra vez.');
+  }
+
+  // ---------- cola de envío (anotaciones escritas sin conexión) ----------
+  function loadQueue() { try { return JSON.parse(store.get(QUEUE_KEY) || '[]'); } catch { return []; } }
+  function saveQueue(q) { if (q.length) store.set(QUEUE_KEY, JSON.stringify(q)); else store.del(QUEUE_KEY); renderQueue(); }
+
+  function renderQueue() {
+    const q = loadQueue();
+    $('#queue-box').classList.toggle('hidden', !q.length);
+    $('#queue-count').textContent = q.length ? `(${q.length})` : '';
+    $('#queue').innerHTML = q.map((l, i) => `<li data-i="${i}"><div class="line"><span>${esc(l.slice(2))}</span>
+      <button class="icon" data-act="unqueue" title="No enviar">🗑️</button></div></li>`).join('');
+  }
+
+  $('#queue').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-act="unqueue"]');
+    if (!b) return;
+    const q = loadQueue();
+    const line = q[b.closest('li').dataset.i];
+    if (line && confirm(`¿Descartar esta anotación sin enviarla?\n\n${line.slice(2)}`)) saveQueue(q.filter((l) => l !== line));
+  });
+
+  // Envía todo lo pendiente. Devuelve 'sent', 'offline', 'empty' o lanza el error de GitHub.
+  let flushing = null;
+  function flushQueue() {
+    if (!flushing) flushing = (async () => {
+      const batch = loadQueue();
+      if (!batch.length || !token) return 'empty';
+      try {
+        await appendToInbox(batch);
+      } catch (err) {
+        if (err.offline) return 'offline';
+        throw err;
+      }
+      // Quita lo enviado, pero no lo que se haya añadido mientras tanto
+      saveQueue(loadQueue().filter((l) => !batch.includes(l)));
+      return 'sent';
+    })().finally(() => { flushing = null; });
+    return flushing;
   }
 
   // Cambia una línea concreta de la bandeja (newLine = null la borra). Lee siempre la versión
@@ -500,8 +569,8 @@
     $('#inbox').innerHTML = inboxLines.length
       ? `<ul class="inbox">${inboxLines.map((l, i) => `<li data-i="${i}">
           <div class="line"><span>${esc(l.slice(2))}</span>
-            <button class="icon" data-act="edit" title="Editar">✏️</button>
-            <button class="icon" data-act="del" title="Borrar">🗑️</button></div>
+            <button class="icon" data-act="edit" title="${offline ? 'Necesita conexión' : 'Editar'}"${offline ? ' disabled' : ''}>✏️</button>
+            <button class="icon" data-act="del" title="${offline ? 'Necesita conexión' : 'Borrar'}"${offline ? ' disabled' : ''}>🗑️</button></div>
         </li>`).join('')}</ul>`
       : '<p class="empty">Vacía. Claude procesa la bandeja al abrir sesión.</p>';
   }
@@ -549,39 +618,84 @@
     }
   });
 
+  function draw(inboxText, diaryText) {
+    entries = parseDiary(diaryText);
+    if (filterTag && !entries.some((e) => isVisible(e) && e.tags.includes(filterTag))) filterTag = null;
+    renderInbox(inboxText);
+    renderTags();
+    renderOpen();
+  }
+
+  // Carga el diario y la bandeja. Sin red, enseña la última copia guardada.
   async function refresh() {
     msg($('#add-msg'), 'Cargando…');
+    renderQueue();
     try {
       const [inbox, diary] = await Promise.all([getFile(INBOX), getFile(DIARY)]);
-      entries = parseDiary(diary.text);
-      if (filterTag && !entries.some((e) => isVisible(e) && e.tags.includes(filterTag))) filterTag = null;
-      renderInbox(inbox.text);
-      renderTags();
-      renderOpen();
+      offline = false;
+      store.set(COPY_KEY, JSON.stringify({ inbox: inbox.text, diary: diary.text, at: madridNow() }));
+      draw(inbox.text, diary.text);
       msg($('#add-msg'), '');
     } catch (err) {
-      msg($('#add-msg'), err.message, 'err');
+      if (!err.offline) { msg($('#add-msg'), err.message, 'err'); return; }
+      offline = true;
+      let copy = null;
+      try { copy = JSON.parse(store.get(COPY_KEY) || 'null'); } catch {}
+      if (copy) draw(copy.inbox, copy.diary);
+      else drawInbox();
+      msg($('#add-msg'), copy ? `Sin conexión: datos de ${copy.at}. Lo que anotes se enviará al volver la red.`
+        : 'Sin conexión. Lo que anotes se enviará al volver la red.', 'err');
     }
   }
 
   // ---------- acciones ----------
+  // Toda anotación pasa por la cola: así, si no hay red, ya está guardada en el móvil
+  // con la fecha y hora en que se escribió, y sale sola después.
   async function add(text) {
     const btn = $('#btn-add');
     btn.disabled = true;
+    saveQueue([...loadQueue(), `- ${madridNow()} · ${text}`]);
     msg($('#add-msg'), 'Guardando…');
     try {
-      await appendToInbox(`- ${madridNow()} · ${text}`);
-      msg($('#add-msg'), 'Anotado ✓', 'ok');
+      const result = await flushQueue();
+      if (result === 'offline') {
+        offline = true;
+        drawInbox();
+        msg($('#add-msg'), 'Sin conexión: guardada en el móvil. Se enviará sola al volver la red.', 'ok');
+        return true;
+      }
       await refresh();
       msg($('#add-msg'), 'Anotado ✓', 'ok');
       return true;
     } catch (err) {
-      msg($('#add-msg'), err.message, 'err');
-      return false;
+      msg($('#add-msg'), `${err.message}. La anotación queda guardada en el móvil y se reintentará.`, 'err');
+      return true;
     } finally {
       btn.disabled = false;
     }
   }
+
+  // Al volver la red o volver a la app: enviar lo pendiente y recargar.
+  async function resync() {
+    if (!token) return;
+    try { await flushQueue(); } catch {}
+    await refresh();
+    checkVersion();
+  }
+  window.addEventListener('online', resync);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') resync(); });
+
+  // ---------- aviso de versión nueva ----------
+  async function checkVersion() {
+    try {
+      const res = await fetch(`./?v=${Date.now()}`, { cache: 'no-store' });
+      const live = ((await res.text()).match(/const VERSION = '([^']+)'/) || [])[1];
+      $('#update').classList.toggle('hidden', !live || live === VERSION);
+    } catch {}   // sin red no se comprueba
+  }
+  $('#btn-update').addEventListener('click', () => location.reload());
+
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
   $('#btn-add').addEventListener('click', async () => {
     const raw = $('#txt').value.trim();
@@ -771,7 +885,7 @@
     selTag = store.get(TAG_KEY) || null;
     renderTypes();
     renderTags();
-    refresh();
+    resync();
   }
 
   // ---------- arranque ----------
